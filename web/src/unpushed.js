@@ -19,6 +19,7 @@ import { openFile } from './tabs.js';
 import { copyToClipboard } from './ui.js';
 import { treeEl, updateSidebarToggleState } from './tree.js';
 import { makeCardKeeper, pointerPos } from './cardkeep.js';
+import { saveSessionUI } from './session-ui.js';
 
 const upPanel = () => $('#unpushed');
 const upBody = () => $('#unpushed-body');
@@ -251,7 +252,9 @@ export function initUnpushed() {
   if (!el) return;
 
   $('#unpushed-collapse')?.addEventListener('click', () => {
-    upPanel()?.classList.toggle('collapsed');
+    const p = upPanel();
+    p?.classList.toggle('collapsed');
+    if (p) saveSessionUI('unpushedCollapsed', p.classList.contains('collapsed'));
     hideCommitCard();
   });
 
@@ -263,6 +266,7 @@ export function initUnpushed() {
       dragging = true;
       rz.classList.add('drag');
       upPanel()?.classList.remove('collapsed');
+      saveSessionUI('unpushedCollapsed', false);
       e.preventDefault();
     });
     addEventListener('mousemove', e => {
@@ -275,6 +279,8 @@ export function initUnpushed() {
       if (!dragging) return;
       dragging = false;
       rz.classList.remove('drag');
+      const p = upPanel();
+      if (p) saveSessionUI('unpushedHeight', Math.round(p.getBoundingClientRect().height));
     });
   }
 

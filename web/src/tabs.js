@@ -74,7 +74,7 @@ function openTabMenu(index, x, y) {
    puts the tab back on the working tree, which is what "open this file" means
    everywhere else in px0. */
 export async function openFile(path, opts = {}) {
-  const { line, push = true, col, view, soft = false, ref = '' } = opts;
+  const { line, push = true, col, view, soft = false, ref = '', scrollTop = 0, diffScroll = 0, restoringSession = false } = opts;
   const prev = doc_();
   const wantsDiff = view === 'diff';
   const wantsSource = view === 'source';
@@ -96,7 +96,8 @@ export async function openFile(path, opts = {}) {
   }
   if (idx < 0) {
     let j;
-    const start = line ? Math.max(0, Math.floor((line - 1) / CHUNK) * CHUNK) : 0;
+    const startLine = line || Math.floor(scrollTop / LH) + 1;
+    const start = Math.max(0, Math.floor((startLine - 1) / CHUNK) * CHUNK);
     try {
       j = await api('/api/file', { path, start, count: CHUNK, ref });
     } catch (e) {
@@ -128,7 +129,7 @@ export async function openFile(path, opts = {}) {
       total: isImg ? 0 : j.total, maxCols: isImg ? 0 : j.maxCols,
       size: j.size, lines: isImg ? [] : new Array(j.total),
       chunks: new Set(isImg ? [] : [start / CHUNK]),
-      pending: new Set(), refining: new Set(), scrollTop: 0, cur: line || 1,
+      pending: new Set(), refining: new Set(), scrollTop, diffScroll, cur: line || 1,
       outline: null, gen: 0, markdown: !isImg && !!j.markdown, table: !isImg && !!j.table, isImage: isImg,
       deleted: !isImg && !!j.deleted,
       gutter: null,
@@ -147,7 +148,10 @@ export async function openFile(path, opts = {}) {
     if (!isImg && j.refine) refineChunk(d, start / CHUNK);
     if (!isImg) loadGutter(d);
   }
-  if (prev && prev !== S.tabs[idx]) prev.scrollTop = vp.scrollTop;
+  if (!restoringSession && prev && prev !== S.tabs[idx]) {
+    prev.scrollTop = vp.scrollTop;
+    if (prev.diffMode) prev.diffScroll = diffScrollTop();
+  }
   if (prev !== S.tabs[idx]) { clearSelectAll(); clearFind(); }
   S.active = idx;
   const d = S.tabs[idx];
@@ -195,7 +199,7 @@ export async function openFile(path, opts = {}) {
   if ($('#pane-right-problems')?.classList.contains('active')) renderProblemsPane();
   if ($('#panel-outline')?.classList.contains('active')) loadOutline();
   if (push) pushHistory(path, line || d.cur);
-  saveWorkspaceState();
+  if (!restoringSession) saveWorkspaceState();
   emit('tab:activated', { doc: d, prevDoc: prev });
 }
 
@@ -481,11 +485,14 @@ export function drawTabs() {
   if (act) act.scrollIntoView({ block: 'nearest', inline: 'nearest' });
 }
 
-export function switchTab(i) {
+export function switchTab(i, { restoringSession = false } = {}) {
   if (i === S.active || !S.tabs[i]) return;
   clearLink();
   const prev = doc_();
-  if (prev) prev.scrollTop = vp.scrollTop;
+  if (!restoringSession && prev) {
+    prev.scrollTop = vp.scrollTop;
+    if (prev.diffMode) prev.diffScroll = diffScrollTop();
+  }
   S.active = i;
   const curDoc = S.tabs[i];
   syncImageView();
@@ -505,34 +512,72 @@ export function switchTab(i) {
   if ($('#pane-right-problems')?.classList.contains('active')) renderProblemsPane();
   if ($('#panel-outline')?.classList.contains('active')) loadOutline();
   pushHistory(S.tabs[i].path, S.tabs[i].cur);
-  saveWorkspaceState();
+  if (!restoringSession) saveWorkspaceState();
   emit('tab:activated', { doc: S.tabs[i], prevDoc: prev });
 }
 
 let saveSessionTimer = null;
+let restoringWorkspaceSession = false;
+
+function workspaceSessionPayload() {
+  const active = doc_();
+  if (active) {
+    active.scrollTop = vp.scrollTop;
+    if (active.diffMode) active.diffScroll = diffScrollTop();
+  }
+  const tabs = S.tabs.map(t => ({
+    path: t.path,
+    ref: t.diffRef || '',
+    scrollTop: Math.round(t.scrollTop || 0),
+    diffScroll: Math.round(t.diffScroll || 0),
+  }));
+  return { tabs, active: S.active };
+}
+
+function flushWorkspaceState() {
+  if (restoringWorkspaceSession) return;
+  if (saveSessionTimer) clearTimeout(saveSessionTimer);
+  const url = new URL('api/session', document.baseURI);
+  fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(workspaceSessionPayload()),
+    keepalive: true,
+  }).catch(() => {});
+}
+
 export function saveWorkspaceState() {
+  if (restoringWorkspaceSession) return;
   if (saveSessionTimer) clearTimeout(saveSessionTimer);
   saveSessionTimer = setTimeout(async () => {
     try {
-      const tabs = S.tabs.map(t => ({ path: t.path, ref: t.diffRef || '' }));
-      await apiPostJson('/api/session', { tabs, active: S.active });
+      await apiPostJson('/api/session', workspaceSessionPayload());
     } catch {}
   }, 200);
 }
 
 export async function restoreWorkspaceTabs() {
+  restoringWorkspaceSession = true;
   try {
     const session = await api('/api/session');
     if (!session || !Array.isArray(session.tabs) || session.tabs.length === 0) return false;
     for (const t of session.tabs) {
-      if (t.path) await openFile(t.path, { push: false, ref: t.ref || '' });
+      if (t.path) await openFile(t.path, {
+        push: false,
+        restoringSession: true,
+        ref: t.ref || '',
+        scrollTop: Number(t.scrollTop) || 0,
+        diffScroll: Number(t.diffScroll) || 0,
+      });
     }
     if (typeof session.active === 'number' && session.active >= 0 && session.active < S.tabs.length) {
-      switchTab(session.active);
+      switchTab(session.active, { restoringSession: true });
     }
     return true;
   } catch {
     return false;
+  } finally {
+    restoringWorkspaceSession = false;
   }
 }
 
@@ -587,7 +632,20 @@ export function initTabs() {
   addEventListener('keydown', e => { if (e.key === 'Escape') closeTabMenu(); });
   addEventListener('resize', closeTabMenu);
   addEventListener('blur', closeTabMenu);
+  addEventListener('pagehide', flushWorkspaceState);
   document.addEventListener('scroll', closeTabMenu, true);
+  vp.addEventListener('scroll', () => {
+    const d = doc_();
+    if (!d) return;
+    d.scrollTop = vp.scrollTop;
+    saveWorkspaceState();
+  }, { passive: true });
+  $('#diffview')?.addEventListener('scroll', () => {
+    const d = doc_();
+    if (!d?.diffMode) return;
+    d.diffScroll = diffScrollTop();
+    saveWorkspaceState();
+  }, { passive: true });
   const crumbsEl = $('#crumbs');
   if (crumbsEl) {
     crumbsEl.addEventListener('click', e => {
