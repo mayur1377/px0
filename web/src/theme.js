@@ -4,12 +4,18 @@
 // /static/themes.css, so themes are discovered from the loaded stylesheets and
 // adding one needs no JavaScript change. See docs/internals/styling-and-themes.md.
 import { showToast } from './ui.js';
+import { DEFAULT_THEME, chooseThemePreference } from './theme-preference.js';
 
 const KEY = 'px0.theme';
-const DEFAULT_THEME = 'github-dark';
 const THEME_SELECTOR = /^(?::root|html)?\[data-theme=["']?([\w-]+)["']?\]$/;
 
+export { DEFAULT_THEME, chooseThemePreference };
+
 let themes = null;
+
+export function getStoredTheme() {
+  try { return localStorage.getItem(KEY); } catch { return null; }
+}
 
 export function listThemes() {
   if (themes) return themes;
@@ -42,7 +48,18 @@ export const currentTheme = () => document.documentElement.dataset.theme;
 export function setTheme(id, persist = true) {
   if (!listThemes().some(t => t.id === id)) return false;
   document.documentElement.dataset.theme = id;
-  if (persist) { try { localStorage.setItem(KEY, id); } catch {} }
+  if (persist) {
+    try { localStorage.setItem(KEY, id); } catch {}
+    try {
+      const base = document.baseURI || (location.origin + '/');
+      const url = new URL('api/settings', base);
+      void fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 'workbench.colorTheme': id }),
+      }).catch(() => {});
+    } catch {}
+  }
   return true;
 }
 
@@ -55,9 +72,9 @@ export function cycleTheme() {
 }
 
 export function initTheme() {
-  let saved = null;
-  try { saved = localStorage.getItem(KEY); } catch {}
-  if (saved && setTheme(saved, false)) return;
+  const saved = getStoredTheme();
+  const preferred = chooseThemePreference(saved, null);
+  if (preferred && setTheme(preferred, false)) return;
   if (setTheme(DEFAULT_THEME, false)) return;
   // The attribute in index.html may name a theme that was since removed.
   const all = listThemes();
